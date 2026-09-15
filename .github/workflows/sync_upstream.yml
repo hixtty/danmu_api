@@ -1,0 +1,68 @@
+name: Sync Upstream
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 每天 UTC 06:00（北京时间 14:00）
+  workflow_dispatch:      # 支持手动触发
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/huangxd-/danmu_api.git 2>/dev/null \
+            || git remote set-url upstream https://github.com/huangxd-/danmu_api.git
+
+      - name: Fetch upstream
+        run: git fetch upstream --tags --force
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Hard sync main to upstream
+        run: |
+          set -euo pipefail
+
+          # 1) 备份同步工作流自身，避免被硬同步删除
+          mkdir -p /tmp/keep
+          cp .github/workflows/sync_upstream.yml /tmp/keep/sync_upstream.yml
+
+          # 2) 以 upstream 为准重建 main，彻底消除合并冲突的可能
+          git checkout -B main upstream/main
+
+          # 3) 重新应用本地对工作流的裁剪（这些工作流依赖上游 secrets，必然失败）
+          rm -f .github/workflows/docker-image.yml \
+                .github/workflows/pr_agent.yml \
+                .github/workflows/sync_fork.yml \
+                .github/workflows/sync_hf.yml
+
+          # 4) 还原同步工作流自身
+          mkdir -p .github/workflows
+          cp /tmp/keep/sync_upstream.yml .github/workflows/sync_upstream.yml
+
+          # 5) 内容与远端一致则直接结束，避免无意义的强推
+          git add -A
+          if [ "$(git write-tree)" = "$(git rev-parse origin/main^{tree})" ]; then
+            echo "Already in sync with upstream, nothing to push."
+            exit 0
+          fi
+
+          git commit -m "chore: hard sync with upstream $(git rev-parse --short upstream/main)"
+          git push origin main --force
